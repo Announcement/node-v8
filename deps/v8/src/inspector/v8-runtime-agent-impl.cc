@@ -227,7 +227,8 @@ void V8RuntimeAgentImpl::evaluate(
     Maybe<bool> includeCommandLineAPI, Maybe<bool> silent,
     Maybe<int> executionContextId, Maybe<bool> returnByValue,
     Maybe<bool> generatePreview, Maybe<bool> userGesture,
-    Maybe<bool> awaitPromise, std::unique_ptr<EvaluateCallback> callback) {
+    Maybe<bool> awaitPromise, Maybe<bool> throwOnSideEffect,
+    std::unique_ptr<EvaluateCallback> callback) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("devtools.timeline"),
                "EvaluateScript");
   int contextId = 0;
@@ -255,13 +256,13 @@ void V8RuntimeAgentImpl::evaluate(
   if (evalIsDisabled) scope.context()->AllowCodeGenerationFromStrings(true);
 
   v8::MaybeLocal<v8::Value> maybeResultValue;
-  v8::Local<v8::Script> script;
-  if (m_inspector->compileScript(scope.context(), expression, String16())
-          .ToLocal(&script)) {
+  {
     v8::MicrotasksScope microtasksScope(m_inspector->isolate(),
                                         v8::MicrotasksScope::kRunMicrotasks);
-    maybeResultValue = script->Run(scope.context());
-  }
+    maybeResultValue = v8::debug::EvaluateGlobal(
+        m_inspector->isolate(), toV8String(m_inspector->isolate(), expression),
+        throwOnSideEffect.fromMaybe(false));
+  }  // Run microtasks before returning result.
 
   if (evalIsDisabled) scope.context()->AllowCodeGenerationFromStrings(false);
 
@@ -572,7 +573,7 @@ void V8RuntimeAgentImpl::runScript(
 }
 
 Response V8RuntimeAgentImpl::queryObjects(
-    const String16& prototypeObjectId,
+    const String16& prototypeObjectId, Maybe<String16> objectGroup,
     std::unique_ptr<protocol::Runtime::RemoteObject>* objects) {
   InjectedScript::ObjectScope scope(m_session, prototypeObjectId);
   Response response = scope.initialize();
@@ -583,7 +584,8 @@ Response V8RuntimeAgentImpl::queryObjects(
   v8::Local<v8::Array> resultArray = m_inspector->debugger()->queryObjects(
       scope.context(), v8::Local<v8::Object>::Cast(scope.object()));
   return scope.injectedScript()->wrapObject(
-      resultArray, scope.objectGroupName(), false, false, objects);
+      resultArray, objectGroup.fromMaybe(scope.objectGroupName()), false, false,
+      objects);
 }
 
 Response V8RuntimeAgentImpl::globalLexicalScopeNames(
@@ -605,6 +607,11 @@ Response V8RuntimeAgentImpl::globalLexicalScopeNames(
     (*outNames)->addItem(toProtocolString(names.Get(i)));
   }
   return Response::OK();
+}
+
+void V8RuntimeAgentImpl::terminateExecution(
+    std::unique_ptr<TerminateExecutionCallback> callback) {
+  m_inspector->debugger()->terminateExecution(std::move(callback));
 }
 
 void V8RuntimeAgentImpl::restore() {

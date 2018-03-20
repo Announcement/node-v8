@@ -743,11 +743,12 @@ class FeedbackVectorFixer {
 
     for (int i = 0; i < function_instances->length(); i++) {
       Handle<JSFunction> fun(JSFunction::cast(function_instances->get(i)));
-      Handle<Cell> new_cell = isolate->factory()->NewManyClosuresCell(
-          isolate->factory()->undefined_value());
-      fun->set_feedback_vector_cell(*new_cell);
+      Handle<FeedbackCell> feedback_cell =
+          isolate->factory()->NewManyClosuresCell(
+              isolate->factory()->undefined_value());
+      fun->set_feedback_cell(*feedback_cell);
       // Only create feedback vectors if we already have the metadata.
-      if (shared_info->is_compiled()) JSFunction::EnsureLiterals(fun);
+      if (shared_info->is_compiled()) JSFunction::EnsureFeedbackVector(fun);
     }
   }
 
@@ -824,8 +825,8 @@ void LiveEdit::ReplaceFunctionCode(
 
   if (shared_info->is_compiled()) {
     // Take whatever code we can get from the new shared function info. We
-    // expect activations of neither the old bytecode nor old FCG code, since
-    // the lowest activation is going to be restarted.
+    // expect activations of neither the old bytecode, since the lowest
+    // activation is going to be restarted.
     Handle<Code> old_code(shared_info->code());
     Handle<Code> new_code(new_shared_info->code());
     // Clear old bytecode. This will trigger self-healing if we do not install
@@ -846,14 +847,19 @@ void LiveEdit::ReplaceFunctionCode(
         new_shared_info->feedback_metadata());
     shared_info->set_feedback_metadata(*new_feedback_metadata);
   } else {
-    shared_info->set_feedback_metadata(
-        FeedbackMetadata::cast(isolate->heap()->empty_fixed_array()));
+    // Use an empty FeedbackMetadata.
+    Handle<FeedbackMetadata> feedback_metadata = FeedbackMetadata::New(isolate);
+    shared_info->set_feedback_metadata(*feedback_metadata);
   }
 
   int start_position = compile_info_wrapper.GetStartPosition();
   int end_position = compile_info_wrapper.GetEndPosition();
-  shared_info->set_start_position(start_position);
-  shared_info->set_end_position(end_position);
+  // TODO(cbruni): only store position information on the SFI.
+  shared_info->set_raw_start_position(start_position);
+  shared_info->set_raw_end_position(end_position);
+  if (shared_info->scope_info()->HasPositionInfo()) {
+    shared_info->scope_info()->SetPositionInfo(start_position, end_position);
+  }
 
   FeedbackVectorFixer::PatchFeedbackVector(&compile_info_wrapper, shared_info,
                                            isolate);
@@ -882,7 +888,7 @@ void LiveEdit::FixupScript(Handle<Script> script, int max_function_literal_id) {
     // as we severed the link from the Script to the SharedFunctionInfo above.
     Handle<SharedFunctionInfo> info(shared, isolate);
     info->set_script(isolate->heap()->undefined_value());
-    Handle<Object> new_noscript_list = WeakFixedArray::Add(
+    Handle<Object> new_noscript_list = FixedArrayOfWeakCells::Add(
         isolate->factory()->noscript_shared_function_infos(), info);
     isolate->heap()->SetRootNoScriptSharedFunctionInfos(*new_noscript_list);
 
@@ -974,16 +980,21 @@ void LiveEdit::PatchFunctionPositions(Handle<JSArray> shared_info_array,
   SharedInfoWrapper shared_info_wrapper(shared_info_array);
   Handle<SharedFunctionInfo> info = shared_info_wrapper.GetInfo();
 
-  int old_function_start = info->start_position();
+  int old_function_start = info->StartPosition();
   int new_function_start = TranslatePosition(old_function_start,
                                              position_change_array);
-  int new_function_end = TranslatePosition(info->end_position(),
-                                           position_change_array);
+  int new_function_end =
+      TranslatePosition(info->EndPosition(), position_change_array);
   int new_function_token_pos =
       TranslatePosition(info->function_token_position(), position_change_array);
 
-  info->set_start_position(new_function_start);
-  info->set_end_position(new_function_end);
+  info->set_raw_start_position(new_function_start);
+  info->set_raw_end_position(new_function_end);
+  // TODO(cbruni): Allocate helper ScopeInfo once the position fields are gone
+  // on the SFI.
+  if (info->scope_info()->HasPositionInfo()) {
+    info->scope_info()->SetPositionInfo(new_function_start, new_function_end);
+  }
   info->set_function_token_position(new_function_token_pos);
 
   if (info->HasBytecodeArray()) {

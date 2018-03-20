@@ -42,8 +42,8 @@ class SharedFunctionInfo : public HeapObject {
   static constexpr Object* const kNoSharedNameSentinel = Smi::kZero;
 
   // [name]: Returns shared name if it exists or an empty string otherwise.
-  inline String* name() const;
-  inline void set_name(String* name);
+  inline String* Name() const;
+  inline void SetName(String* name);
 
   // [code]: Function code.
   DECL_ACCESSORS(code, Code)
@@ -85,6 +85,12 @@ class SharedFunctionInfo : public HeapObject {
 
   // [scope_info]: Scope info.
   DECL_ACCESSORS(scope_info, ScopeInfo)
+
+  // End position of this function in the script source.
+  inline int EndPosition() const;
+
+  // Start position of this function in the script source.
+  inline int StartPosition() const;
 
   // The outer scope info for the purpose of parsing this function, or the hole
   // value if it isn't yet known.
@@ -135,9 +141,6 @@ class SharedFunctionInfo : public HeapObject {
   // even if the GC moves this SharedFunctionInfo.
   DECL_INT_ACCESSORS(unique_id)
 #endif
-
-  // [instance class name]: class name for instances.
-  DECL_ACCESSORS(instance_class_name, String)
 
   // [function data]: This field holds some additional data for function.
   // Currently it has one of:
@@ -191,13 +194,6 @@ class SharedFunctionInfo : public HeapObject {
 
   // [script]: Script from which the function originates.
   DECL_ACCESSORS(script, Object)
-
-  // [start_position_and_type]: Field used to store both the source code
-  // position, whether or not the function is a function expression,
-  // and whether or not the function is a toplevel function. The two
-  // least significants bit indicates whether the function is an
-  // expression and the rest contains the source code position.
-  DECL_INT_ACCESSORS(start_position_and_type)
 
   // The function is subject to debugging if a debug info is attached.
   inline bool HasDebugInfo() const;
@@ -262,14 +258,24 @@ class SharedFunctionInfo : public HeapObject {
   // Position of the 'function' token in the script source.
   DECL_INT_ACCESSORS(function_token_position)
 
+  // [raw_start_position_and_type]: Field used to store both the source code
+  // position, whether or not the function is a function expression,
+  // and whether or not the function is a toplevel function. The two
+  // least significants bit indicates whether the function is an
+  // expression and the rest contains the source code position.
+  // TODO(cbruni): start_position should be removed from SFI.
+  DECL_INT_ACCESSORS(raw_start_position_and_type)
+
   // Position of this function in the script source.
-  DECL_INT_ACCESSORS(start_position)
+  // TODO(cbruni): start_position should be removed from SFI.
+  DECL_INT_ACCESSORS(raw_start_position)
 
   // End position of this function in the script source.
-  DECL_INT_ACCESSORS(end_position)
+  // TODO(cbruni): end_position should be removed from SFI.
+  DECL_INT_ACCESSORS(raw_end_position)
 
   // Returns true if the function has shared name.
-  inline bool has_shared_name() const;
+  inline bool HasSharedName() const;
 
   // Is this function a named function expression in the source code.
   DECL_BOOLEAN_ACCESSORS(is_named_expression)
@@ -342,7 +348,11 @@ class SharedFunctionInfo : public HeapObject {
   static Handle<Object> GetSourceCode(Handle<SharedFunctionInfo> shared);
   static Handle<Object> GetSourceCodeHarmony(Handle<SharedFunctionInfo> shared);
 
-  // Tells whether this function should be subject to debugging.
+  // Tells whether this function should be subject to debugging, e.g. for
+  // - scope inspection
+  // - internal break points
+  // - coverage and type profile
+  // - error stack trace
   inline bool IsSubjectToDebugging();
 
   // Whether this function is defined in user-provided JavaScript code.
@@ -398,7 +408,7 @@ class SharedFunctionInfo : public HeapObject {
 
    private:
     Script::Iterator script_iterator_;
-    WeakFixedArray::Iterator noscript_sfi_iterator_;
+    FixedArrayOfWeakCells::Iterator noscript_sfi_iterator_;
     SharedFunctionInfo::ScriptIterator sfi_iterator_;
     DisallowHeapAllocation no_gc_;
     DISALLOW_COPY_AND_ASSIGN(GlobalIterator);
@@ -420,11 +430,9 @@ class SharedFunctionInfo : public HeapObject {
 #define SHARED_FUNCTION_INFO_FIELDS(V)        \
   /* Pointer fields. */                       \
   V(kCodeOffset, kPointerSize)                \
-  V(kNameOffset, kPointerSize)                \
-  V(kScopeInfoOffset, kPointerSize)           \
+  V(kNameOrScopeInfoOffset, kPointerSize)     \
   V(kOuterScopeInfoOffset, kPointerSize)      \
   V(kConstructStubOffset, kPointerSize)       \
-  V(kInstanceClassNameOffset, kPointerSize)   \
   V(kFunctionDataOffset, kPointerSize)        \
   V(kScriptOffset, kPointerSize)              \
   V(kDebugInfoOffset, kPointerSize)           \
@@ -455,7 +463,7 @@ class SharedFunctionInfo : public HeapObject {
   // No weak fields.
   typedef BodyDescriptor BodyDescriptorWeak;
 
-// Bit fields in |start_position_and_type|.
+// Bit fields in |raw_start_position_and_type|.
 #define START_POSITION_AND_TYPE_BIT_FIELDS(V, _) \
   V(IsNamedExpressionBit, bool, 1, _)            \
   V(IsTopLevelBit, bool, 1, _)                   \
@@ -469,7 +477,9 @@ class SharedFunctionInfo : public HeapObject {
   V(IsNativeBit, bool, 1, _)                             \
   V(IsStrictBit, bool, 1, _)                             \
   V(IsWrappedBit, bool, 1, _)                            \
-  V(FunctionKindBits, FunctionKind, 11, _)               \
+  V(IsClassConstructorBit, bool, 1, _)                   \
+  V(IsDerivedConstructorBit, bool, 1, _)                 \
+  V(FunctionKindBits, FunctionKind, 5, _)                \
   V(HasDuplicateParametersBit, bool, 1, _)               \
   V(AllowLazyCompilationBit, bool, 1, _)                 \
   V(NeedsHomeObjectBit, bool, 1, _)                      \
@@ -487,12 +497,6 @@ class SharedFunctionInfo : public HeapObject {
                 DisabledOptimizationReasonBits::kMax);
 
   STATIC_ASSERT(kLastFunctionKind <= FunctionKindBits::kMax);
-  // Masks for checking if certain FunctionKind bits are set without fully
-  // decoding of the FunctionKind bit field.
-  static const int kClassConstructorMask = FunctionKind::kClassConstructor
-                                           << FunctionKindBits::kShift;
-  static const int kDerivedConstructorMask = FunctionKind::kDerivedConstructor
-                                             << FunctionKindBits::kShift;
 
 // Bit positions in |debugger_hints|.
 #define DEBUGGER_HINTS_BIT_FIELDS(V, _)        \
@@ -514,8 +518,9 @@ class SharedFunctionInfo : public HeapObject {
   inline bool needs_home_object() const;
 
  private:
-  // [raw_name]: Function name string or kNoSharedNameSentinel.
-  DECL_ACCESSORS(raw_name, Object)
+  // [name_or_scope_info]: Function name string, kNoSharedNameSentinel or
+  // ScopeInfo.
+  DECL_ACCESSORS(name_or_scope_info, Object)
 
   inline void set_kind(FunctionKind kind);
 
